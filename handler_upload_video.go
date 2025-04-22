@@ -115,7 +115,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	s3URL := "https://" + cfg.s3Bucket + ".s3." + cfg.s3Region + ".amazonaws.com/" + key
+	s3URL := cfg.getObjectURL(key)
 	video.VideoURL = &s3URL
 
 	err = cfg.db.UpdateVideo(video)
