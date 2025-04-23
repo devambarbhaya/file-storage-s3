@@ -1,18 +1,29 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
 )
+
+type ffprobeOutput struct {
+	Streams []struct {
+		Width int `json:"width"`
+		Height int `json:"height"`
+	} `json:"streams"`
+}
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	videoIDString := r.PathValue("videoID")
@@ -95,6 +106,19 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	aspectRatio, err := getVideoAspectRatio(tmpFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to get aspect ratio of the video", err)
+		return
+	}
+
+	prefix := "other/"
+	if aspectRatio == "16:9" {
+		prefix = "landscape/"
+	} else if aspectRatio == "9:16" {
+		prefix = "portrait/"
+	}
+
 	randomBytes := make([]byte, 16)
 	_, err = rand.Read(randomBytes)
 	if err != nil {
@@ -102,7 +126,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	
-	key := hex.EncodeToString(randomBytes) + filepath.Ext(header.Filename)
+	key := prefix + hex.EncodeToString(randomBytes) + filepath.Ext(header.Filename)
 
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket: &cfg.s3Bucket,
@@ -125,4 +149,49 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, video)
+}
+
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+
+	var result ffprobeOutput
+	err = json.Unmarshal(out.Bytes(), &result)
+	if err != nil {
+		return "", err
+	}
+
+	if len(result.Streams) == 0 {
+		return "", errors.New("no streams found in the video")
+	}
+
+	width := result.Streams[0].Width
+	height := result.Streams[0].Height
+
+	if width == 0 || height == 0 {
+		return "", errors.New("invalid width or height in the video stream")
+	}
+
+	ratio := float64(width) / float64(height)
+
+	if approx(ratio, 16.0/9.0) {
+		return "16:9", nil
+	} else if approx(ratio, 9.0/16.0) {
+		return "9:16", nil
+	} else {
+		return "other", nil
+	}
+}
+
+func approx(a, b float64) bool {
+	const epsilon = 0.01
+	return (a-b) < epsilon && (b-a) < epsilon
 }
